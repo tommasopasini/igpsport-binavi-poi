@@ -15,6 +15,11 @@ in **[BINAVI_NOTES.md](BINAVI_NOTES.md)**.
 
 > ⚠️ Unofficial. Not affiliated with or endorsed by iGPSPORT. Built by reverse
 > engineering; a firmware update could change the format. Use at your own risk.
+>
+> **Tested only on the BiNavi Air.** The `.cnx` format is written by the iGPSPORT app
+> (shared across the product line), so it may work on other map-capable iGPSPORT devices —
+> but whether the firmware actually renders the points is device-specific and unverified
+> elsewhere. Reports from other devices welcome.
 
 ## How it works
 
