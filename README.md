@@ -24,8 +24,21 @@ track (delta-encoded) and a `<Points>` list of POIs. `generate_cnx.py` takes a n
 to the device. A round-trip self-test checks the encoded track decodes back to the GPX
 within 0.5 cm before anything is written.
 
-FIT course points were tried and **do not display** on the BiNavi — see
-[BINAVI_NOTES.md §4](BINAVI_NOTES.md). Those scripts live in `experiments/` for reference.
+### Why not GPX or FIT?
+
+Both were tried first; neither gets POIs onto the device:
+
+- **GPX** is only a *track* source. The BiNavi's own route format is `.cnx`; when a GPX is
+  imported (via the app), the track is converted to `.cnx` and its `<wpt>` **waypoints are
+  dropped** — they never become on-device POIs. So GPX is useful here only for previewing
+  points in a desktop map app, not for the device.
+- **FIT** course files *load* (the track works), but the firmware **ignores the
+  `course_point` messages** — no icons, no alerts. Verified on the device: a FIT with typed
+  water/food/danger course points showed nothing. Details in
+  [BINAVI_NOTES.md §4](BINAVI_NOTES.md); the scripts are kept in `experiments/` as a record.
+
+The native `.cnx` `<Points>` list is the only channel the device actually renders — which is
+what `generate_cnx.py` writes.
 
 ## Requirements
 
@@ -64,14 +77,54 @@ See **[roadbook.example.csv](roadbook.example.csv)**. Columns:
 | `description` | short text shown on the device (a leading `!` reads as a warning) |
 
 There is no "fountain" or "food" category on the device; `supply point` is the
-closest for water/feed, `shop` for a food stop. Full enum in the example file and in
-[BINAVI_NOTES.md §3](BINAVI_NOTES.md).
+closest for water/feed, `shop` for a food stop.
+
+**POI type legend** (the internal `<Type>` enum — *not* the app's on-screen menu order):
+
+| code | name | code | name |
+|---|---|---|---|
+| 0 | waypoint | 12 | equipment area |
+| 1 | sprint point | 13 | shop |
+| 2 | hc climb | 14 | meeting point |
+| 3 | level 1 climb | 15 | viewing platform |
+| 4 | level 2 climb | 16 | instagram-worthy location |
+| 5 | level 3 climb | 17 | tunnel |
+| 6 | level 4 climb | 18 | valley |
+| 7 | supply point | 19 | dangerous road |
+| 8 | garbage recycle area | 20 | sharp turn |
+| 9 | restroom | 21 | steep slope |
+| 10 | service point | 22 | intersection |
+| 11 | medical aid station | | |
+
+You can write either the name or the number in the `type` column. (How each renders as an
+icon is the device's business; see [BINAVI_NOTES.md §3](BINAVI_NOTES.md) for how the enum was
+recovered.)
 
 ### Preview in a map app (optional)
 
 `build_roadbook_gpx.py` writes the same points as GPX waypoints (to `outputs/`) so you
 can eyeball them in Komoot/GPXSee. This is preview only — it does **not** put anything
 on the BiNavi.
+
+## Testing on the device (without riding)
+
+POIs are **not** map icons — on the BiNavi they appear only **during active navigation**, as
+a proximity reminder whose distance counts down as you approach (no sound). To confirm that
+before a real ride, make a short test route near you with 2–3 points a few hundred metres
+apart, navigate it, and walk toward the first point until the reminder appears.
+
+Two ways to get that test route — useful as an A/B check:
+
+- **With the iGPSPORT app (reference / known-good):** create a short route in the app, add a
+  couple of *Navigation Pro Points* on it, and sync to the device. This is the official path;
+  if your generated file behaves the same, you know the file is right.
+- **Without the app (this tool):** make a tiny GPX near you and a 2–3 line roadbook CSV, run
+  `python generate_cnx.py --gpx inputs/test.gpx --roadbook inputs/test_roadbook.csv`, and copy
+  the `.cnx` to `Courses/`.
+
+Both should show the points the same way. (A FIT-based test route, for contrast, shows
+nothing — that's the dead end documented above; `experiments/generate_test_course.py` builds
+one if you want to see it fail.)
 
 ## Layout
 
