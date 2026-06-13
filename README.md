@@ -1,4 +1,4 @@
-# binavi-poi
+# igpsport-binavi-poi
 
 Put your own points of interest — water, food, hazards, notes — onto an
 **iGPSPORT BiNavi** bike computer so they show up during navigation.
