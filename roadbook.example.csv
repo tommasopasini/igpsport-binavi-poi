@@ -1,0 +1,19 @@
+# Example roadbook. Copy this into inputs/ (e.g. inputs/roadbook.csv) and edit.
+# One row per point. Columns:
+#   km          distance along the GPX track where the point sits (decimal km)
+#   type        category: a name from the enum below, OR its integer code
+#   description text shown on the device (keep it short; a leading "!" reads as a warning)
+#
+# type names -> code:
+#   waypoint 0 | sprint point 1 | hc climb 2 | level 1 climb 3 | level 2 climb 4
+#   level 3 climb 5 | level 4 climb 6 | supply point 7 | garbage recycle area 8
+#   restroom 9 | service point 10 | medical aid station 11 | equipment area 12
+#   shop 13 | meeting point 14 | viewing platform 15 | instagram-worthy location 16
+#   tunnel 17 | valley 18 | dangerous road 19 | sharp turn 20 | steep slope 21
+#   intersection 22
+# NB: there is no "fountain" or "food" category; "supply point" is the closest for water/feed.
+km,type,description
+3.2,supply point,Water fountain
+7.5,shop,Cafe / food stop
+12.0,dangerous road,! Narrow path
+18.4,intersection,! Cross the main road

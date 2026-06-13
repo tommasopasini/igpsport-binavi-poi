@@ -1,0 +1,15 @@
+# All real work stays local: your tracks/roadbooks/PDFs and every generated file.
+inputs/*
+outputs/*
+!inputs/.gitkeep
+!outputs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+*.swp
