@@ -169,6 +169,7 @@ tracks/roadbooks/outputs never leave the local machine.
 
 Committed:
 - `generate_cnx.py` — main tool: GPX + roadbook CSV → native `.cnx` (track codec §2 + POIs, with self-test)
+- `gpx_to_roadbook.py` — convert a GPX's `<wpt>` waypoints into a roadbook CSV: snaps each to the nearest km on the track and maps its `<sym>` to the §3 `<Type>` enum (unknown `<sym>` → `waypoint`)
 - `build_roadbook_gpx.py` — preview helper: same points as GPX waypoints (for map viewers)
 - `roadbook.example.csv` — roadbook CSV template
 - `README.md`, `LICENSE`, `BINAVI_NOTES.md` (this file)

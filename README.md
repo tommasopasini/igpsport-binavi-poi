@@ -35,8 +35,9 @@ Both were tried first; neither gets POIs onto the device:
 
 - **GPX** is only a *track* source. The BiNavi's own route format is `.cnx`; when a GPX is
   imported (via the app), the track is converted to `.cnx` and its `<wpt>` **waypoints are
-  dropped** — they never become on-device POIs. So GPX is useful here only for previewing
-  points in a desktop map app, not for the device.
+  dropped** — they never become on-device POIs. (You *can* still reuse those `<wpt>`s as a
+  roadbook source with `gpx_to_roadbook.py` below — that routes them into the `.cnx`
+  `<Points>` list instead, the channel the device does render.)
 - **FIT** course files *load* (the track works), but the firmware **ignores the
   `course_point` messages** — no icons, no alerts. Verified on the device: a FIT with typed
   water/food/danger course points showed nothing. Details in
@@ -70,6 +71,51 @@ cp outputs/my_ride.cnx /mnt/d/iGPSPORT/Courses/
 
 Options: `--gpx`, `--roadbook`, `--out` override the defaults. With one `.gpx` in
 `inputs/` and an `inputs/roadbook.csv`, no arguments are needed.
+
+### From GPX waypoints (skip writing the roadbook by hand)
+
+If your GPX already carries `<wpt>` waypoints — e.g. a Komoot export that *preserved*
+them (the standard Komoot export usually doesn't; check first) — `gpx_to_roadbook.py`
+turns them straight into a roadbook CSV, so you don't place each point by km yourself:
+
+```bash
+# GPX waypoints -> inputs/<gpx-name>_roadbook.csv
+python gpx_to_roadbook.py --gpx inputs/my_ride.gpx
+python generate_cnx.py    --gpx inputs/my_ride.gpx --roadbook inputs/my_ride_roadbook.csv
+```
+
+What it does per waypoint:
+
+- **km** — snaps the waypoint to the nearest point on the track (point-to-segment
+  projection) and reads off its progressive distance. Waypoints sit a few metres off
+  the line (they mark a roadside fountain, not a recorded trackpoint); one farther than
+  `--max-offset` (default 80 m) is still written but flagged, since that usually means
+  it doesn't belong to this track.
+- **type** — maps the waypoint's GPX `<sym>` to the device's `<Type>` enum (see the
+  table below). An unrecognised `<sym>` defaults to `waypoint` (0) and is reported, so
+  you can fix that one row before generating.
+
+The script prints a per-point report; review the `type` column, edit the CSV if needed,
+then run `generate_cnx.py`. (This is the same `.cnx`-only channel as the hand-written
+path — it just authors the roadbook for you.)
+
+#### `<sym>` → POI type mapping
+
+These GPX symbol names are recognised (case-insensitive); anything else falls back to
+`waypoint` (0):
+
+| recognised `<sym>` names | mapped POI type | code |
+|---|---|---|
+| `Drinking Water`, `Water Source`, `Water`, `Potable Water` | supply point | 7 |
+| `Restaurant`, `Fast Food`, `Shop`, `Shopping Center`, `Convenience Store` | shop | 13 |
+| `Restroom`, `Toilet`, `WC` | restroom | 9 |
+| `Danger Area`, `Danger` | dangerous road | 19 |
+| `Summit`, `Scenic Area`, `Viewpoint` | viewing platform | 15 |
+| `Photo` | instagram-worthy location | 16 |
+| `Campground`, `Parking Area` | meeting point | 14 |
+| *(anything else)* | waypoint | 0 |
+
+Add more rows to `TYPE_BY_SYM` in `gpx_to_roadbook.py` if your source uses other names.
 
 ### Roadbook CSV
 
@@ -135,6 +181,7 @@ one if you want to see it fail.)
 
 ```
 generate_cnx.py        main tool: GPX + roadbook CSV -> native .cnx
+gpx_to_roadbook.py     convert GPX <wpt> waypoints -> roadbook CSV (by km + type)
 build_roadbook_gpx.py  preview helper: -> GPX waypoints
 roadbook.example.csv   template for your roadbook
 BINAVI_NOTES.md        reverse-engineered .cnx format + POI enum
