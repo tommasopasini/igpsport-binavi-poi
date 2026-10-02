@@ -3,7 +3,7 @@
 Working document. Goal: show the 16 points of the **Giara 2026** roadbook (fountains,
 food stops, hazards) on the BiNavi during navigation, automatically.
 
-Updated: 2026-06-13
+Updated: 2026-10-02
 
 ---
 
@@ -12,6 +12,8 @@ Updated: 2026-06-13
 - When **powered off** the BiNavi mounts as USB mass storage. When on = charge only.
 - On Windows it is `D:`. On WSL it must be mounted manually:
   `sudo mount -t drvfs D: /mnt/d`  → contents under `/mnt/d/iGPSPORT/`.
+  The mount goes stale if the device re-enumerates (reads fail with "No such device"
+  while Windows still shows `D:`): remount, or work on `D:\` through `powershell.exe`.
 - Device folders: `Activities, Courses, Maps, Roadbooks, Router, Schedule, Segments,
   Settings, System, Workouts`.
 - Routes to navigate live in **`Courses/`**.
@@ -209,3 +211,46 @@ Italian on purpose. Code, docstrings, prints and this document are in English.
 79.8 Bure fountain · 82.8 Fumane fountain+food stop · 89 ⚠ scenic detour+fountain ·
 91 Marano fountain · 93 ⚠ start of descent · 100 Pedemonte fountain · 106 Parona fountain ·
 109 Ponte Diga Chievo fountain
+
+---
+
+## 7. Activity files (`Activities/*.fit`)
+
+Recorded rides are plain FIT activity files named after the start in **device local
+time**: `2026-09-13-07-48-34.fit` started at 05:48:34 UTC with the device on UTC+2. The
+offset is also in the file: `activity.local_timestamp − activity.timestamp` (7200 s).
+`device_log.txt` in `System/` logs each save as `fit stop time <stop>, <start>, <offset>`
+(FIT timestamps, offset in seconds).
+
+### Sync
+Saving a ride uploads it to the phone app over BLE right away (`upload start!` and
+`fit info [<size>:<crc>]` in `device_log.txt`); the app forwards it to Strava and Komoot.
+A `.fit` copied into `Activities/` under a name the device hasn't uploaded is sent on the
+next sync like a new ride (confirmed 2026-09-13 with a repaired file).
+
+### Bug: a ride appended to a stale, never-saved recording
+The device can keep an unsaved recording open for weeks; the next ride is then written
+into the same file. `file_id`, session and lap carry the old fragment's start time and
+position, `total_elapsed_time` spans the whole gap, and the track gets a straight line
+from the fragment to the ride. Seen twice: 2026-06-14 (a 50 s / 211 m fragment, 21.7 h
+earlier) and 2026-09-13 (44 s / 94 m, 24 days earlier, 21 km away at ~1077 m). The log shows it as
+`fit stop time` with a start weeks before the stop. It is not a clock or timezone error:
+the ride's own timestamps are right, so the fix is to cut the fragment out, not to shift
+times. `experiments/fit_fix_clock.py` does that (see the README);
+`experiments/fit_analyze.py` shows the time jump first.
+
+### How the device computes the summary (verified on both rides above)
+- timer = the sum of its start→stop event spans (exact on the June ride; the September
+  file's timer is 12 s more than its events account for)
+- elapsed = stop time − start, where the stop time is the session timestamp + 1 s
+- avg heart rate = mean of all samples, **truncated** (130.94 → 130); max/min = the
+  extremes of the records
+- avg cadence = mean of the **non-zero** samples, truncated (67.50 → 67); max = record max
+- max speed, max temperature = record max; avg temperature rounded (22.94 → 23, one
+  data point)
+- altitude avg/max/min come from a smoothed altitude and don't reproduce from the
+  records; after the jump from a fragment at ~1077 m to a ride at 59 m the smoothing
+  even reported a minimum of −21.8 m
+- total ascent/descent don't reproduce either (no simple hysteresis matches), and the
+  jump between fragment and ride is not counted in them
+- no ride has a power meter, so the power rules are unknown
