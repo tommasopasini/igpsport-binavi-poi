@@ -181,3 +181,33 @@ def test_real_routes_unchanged_apart_from_the_id(tmp_path, monkeypatch, gpx, roa
     run_main(monkeypatch, "--gpx", paths[0], "--roadbook", paths[1], "--out", out)
     strip = lambda x: re.sub(r"<Id>\d+</Id>", "", x)  # noqa: E731
     assert strip(out.read_text(encoding="utf-8")) == strip(paths[2].read_text(encoding="utf-8"))
+
+
+# --- shared helpers used by all three top-level scripts ---------------------------------
+
+def test_resolve_gpx_picks_the_single_track_in_inputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "INPUTS", tmp_path)
+    write(tmp_path, "ride.gpx", "")
+    write(tmp_path, "ride_roadbook.gpx", "")       # a preview file is never the input
+    assert g.resolve_gpx(None) == tmp_path / "ride.gpx"
+
+
+@pytest.mark.parametrize("files, message", [([], "0 candidate GPX"), (["a.gpx", "b.gpx"], "2 candidate GPX")])
+def test_resolve_gpx_needs_exactly_one_candidate(tmp_path, monkeypatch, files, message):
+    monkeypatch.setattr(g, "INPUTS", tmp_path)
+    for name in files:
+        write(tmp_path, name, "")
+    with pytest.raises(SystemExit, match=message):
+        g.resolve_gpx(None)
+
+
+def test_resolve_gpx_rejects_a_missing_file(tmp_path):
+    with pytest.raises(SystemExit, match="GPX not found"):
+        g.resolve_gpx(tmp_path / "nope.gpx")
+
+
+def test_gpx_1_0_is_reported_not_crashed_on(tmp_path):
+    path = write(tmp_path, "old.gpx", '<?xml version="1.0"?><gpx xmlns="http://www.topografix.com/GPX/1/0">'
+                                      '<trk><trkseg><trkpt lat="45" lon="11"/></trkseg></trk></gpx>')
+    with pytest.raises(SystemExit, match="need at least 2 GPX 1.1 trackpoints, found 0"):
+        g.read_trkpts(path)

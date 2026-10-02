@@ -27,7 +27,7 @@ import math
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-from generate_cnx import INPUTS, OUTPUTS, NS, hav, TYPE_BY_NAME
+from generate_cnx import INPUTS, NS, TYPE_BY_NAME, cumulative, read_trkpts, resolve_gpx
 
 NAME_BY_TYPE = {code: name for name, code in TYPE_BY_NAME.items()}
 R = 6371000.0
@@ -49,15 +49,8 @@ TYPE_BY_SYM = {
 
 
 def read_track(path):
-    pts = []  # (lat, lon)
-    for tp in ET.parse(path).getroot().iter(f"{{{NS}}}trkpt"):
-        pts.append((float(tp.get("lat")), float(tp.get("lon"))))
-    if len(pts) < 2:
-        raise SystemExit(f"{path}: need >=2 trackpoints, found {len(pts)}")
-    cum = [0.0]
-    for i in range(1, len(pts)):
-        cum.append(cum[-1] + hav(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]))
-    return pts, cum
+    pts = [(lat, lon) for lat, lon, _ in read_trkpts(path)]
+    return pts, cumulative(pts)
 
 
 def read_waypoints(path):
@@ -122,14 +115,7 @@ def main():
     ap.add_argument("--max-offset", type=float, default=80.0, help="flag waypoints farther than this many metres from the track")
     args = ap.parse_args()
 
-    gpx = args.gpx
-    if gpx is None:
-        cands = sorted(p for p in INPUTS.glob("*.gpx") if not p.name.endswith("_roadbook.gpx"))
-        if len(cands) != 1:
-            raise SystemExit(f"--gpx not given and {len(cands)} candidate GPX in {INPUTS} (expected 1)")
-        gpx = cands[0]
-    if not gpx.exists():
-        raise SystemExit(f"GPX not found: {gpx}")
+    gpx = resolve_gpx(args.gpx)
 
     out = args.out or (INPUTS / (gpx.stem + "_roadbook.csv"))
     out.parent.mkdir(parents=True, exist_ok=True)

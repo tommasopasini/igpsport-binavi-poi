@@ -179,7 +179,7 @@ Committed:
 - `build_roadbook_gpx.py` — preview helper: same points as GPX waypoints (for map viewers)
 - `roadbook.example.csv` — roadbook CSV template
 - `README.md`, `LICENSE`, `BINAVI_NOTES.md` (this file)
-- `tests/` — tests for `generate_cnx.py` and `gpx_to_roadbook.py` (`python3 -m pytest tests/`)
+- `tests/` — tests for the three top-level scripts (`python3 -m pytest tests/`)
 - `experiments/`:
   - `fit_fix_clock.py` + `test_fit_fix_clock.py` — repairs an activity the device appended
     to an old unsaved recording (wrong date, days of elapsed time, phantom straight line);

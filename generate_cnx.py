@@ -82,8 +82,22 @@ def cumulative(pts):
     return cum
 
 
-def read_gpx(path):
-    pts = []  # (lat, lon, ele_m or None)
+def resolve_gpx(path):
+    """`path`, or the single *.gpx in inputs/ (excluding *_roadbook.gpx) when
+    none is given. Exits when there isn't exactly one, or it doesn't exist."""
+    if path is None:
+        cands = sorted(p for p in INPUTS.glob("*.gpx") if not p.name.endswith("_roadbook.gpx"))
+        if len(cands) != 1:
+            raise SystemExit(f"--gpx not given and {len(cands)} candidate GPX in {INPUTS} (expected 1)")
+        path = cands[0]
+    if not path.exists():
+        raise SystemExit(f"GPX not found: {path}")
+    return path
+
+
+def read_trkpts(path):
+    """[(lat, lon, ele_m or None)] for every <trkpt>; exits below 2 points."""
+    pts = []
     for i, tp in enumerate(ET.parse(path).getroot().iter(f"{{{NS}}}trkpt")):
         la, lo = float(tp.get("lat")), float(tp.get("lon"))
         e = tp.find(f"{{{NS}}}ele")
@@ -94,8 +108,12 @@ def read_gpx(path):
             raise SystemExit(f"{path}: trackpoint {i}: elevation {text!r} is not a number")
         pts.append((la, lo, ele))
     if len(pts) < 2:
-        raise SystemExit(f"{path}: need at least 2 trackpoints, found {len(pts)}")
-    return fill_elevations(pts)
+        raise SystemExit(f"{path}: need at least 2 GPX 1.1 trackpoints, found {len(pts)}")
+    return pts
+
+
+def read_gpx(path):
+    return fill_elevations(read_trkpts(path))
 
 
 def fill_elevations(pts):
@@ -262,14 +280,7 @@ def main():
     args = ap.parse_args()
 
     # --- resolve inputs ---
-    gpx = args.gpx
-    if gpx is None:
-        cands = sorted(p for p in INPUTS.glob("*.gpx") if not p.name.endswith("_roadbook.gpx"))
-        if len(cands) != 1:
-            raise SystemExit(f"--gpx not given and {len(cands)} candidate GPX in {INPUTS} (expected 1)")
-        gpx = cands[0]
-    if not gpx.exists():
-        raise SystemExit(f"GPX not found: {gpx}")
+    gpx = resolve_gpx(args.gpx)
 
     roadbook = args.roadbook
     if roadbook is None:

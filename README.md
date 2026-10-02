@@ -221,7 +221,7 @@ gpx_to_roadbook.py     convert GPX <wpt> waypoints -> roadbook CSV (by km + type
 build_roadbook_gpx.py  preview helper: -> GPX waypoints
 roadbook.example.csv   template for your roadbook
 BINAVI_NOTES.md        reverse-engineered .cnx format + POI enum
-tests/                 tests for generate_cnx.py and gpx_to_roadbook.py
+tests/                 tests for the three top-level scripts
 experiments/           fit_fix_clock.py (repairs a wrongly-dated ride, with tests) +
                        FIT course attempts (dead end: device ignores FIT course points)
 inputs/                YOUR tracks / roadbooks / PDFs        (gitignored)
