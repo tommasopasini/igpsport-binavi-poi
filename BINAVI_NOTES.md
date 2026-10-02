@@ -63,6 +63,11 @@ Then a list of **delta** triples:
   with `token[1] = d[1]`. (Quantize the positions onto the 1e-7 grid first to avoid drift.)
 - **elevation = FIRST-order delta in cm**: `ele_mm += token_ele · 10`.
 
+Resolution: a position comes back at most √2 · 0.5e-7° (0.79 cm) off; an elevation at
+most 1.05 cm off (0.5 cm from rounding each point to the cm grid, 0.5 cm from the start
+value's own cm rounding, 0.05 cm from its mm rounding — they don't accumulate). Real GPX elevations, which carry many decimals, land at 0.6–0.9 cm.
+`generate_cnx.py`'s self-test refuses to write a file beyond 0.8 cm / 1.1 cm.
+
 ### `<Points>` — the POIs (this is where the roadbook points go!)
 
 ```xml
@@ -139,8 +144,9 @@ no alerts. So POIs come **only** through the `.cnx` `<Points>`. FIT abandoned.
 ## 5. Final plan for the Giara — STATUS
 
 1. ✅ Complete `Type` enum (§3).
-2. ✅ `Giara.cnx` generated (`generate_giara_cnx.py`): track from `Giara_2026_N_TOCO.gpx`
-   (codec §2, round-trip self-test 0.00 cm) + 16 typed `<Point>` interpolated by km.
+2. ✅ `Giara.cnx` generated (with what is now `generate_cnx.py`): track from
+   `Giara_2026_N_TOCO.gpx` (codec §2, round-trip self-test 0.00 cm position, 0.9 cm
+   elevation) + 16 typed `<Point>` interpolated by km.
 3. ✅ Copied to `Courses/`, removed the old `Giara_2026.fit`. Device regenerated the caches,
    `.tsgn` included (16 points absorbed — see §3-bis).
 4. ✅ **DONE (on-bike A/B test, 2026-06-13):** the app's `.cnx` test route shows the POIs
@@ -169,12 +175,17 @@ tracks/roadbooks/outputs never leave the local machine.
 
 Committed:
 - `generate_cnx.py` — main tool: GPX + roadbook CSV → native `.cnx` (track codec §2 + POIs, with self-test)
-- `gpx_to_roadbook.py` — convert a GPX's `<wpt>` waypoints into a roadbook CSV: snaps each to the nearest km on the track and maps its `<sym>` to the §3 `<Type>` enum (unknown `<sym>` → `waypoint`)
+- `gpx_to_roadbook.py` — convert a GPX's `<wpt>` waypoints into a roadbook CSV: snaps each to the nearest km on the track (on loops, the pass that follows the previous waypoint) and maps its `<sym>` to the §3 `<Type>` enum (unknown `<sym>` → `waypoint`)
 - `build_roadbook_gpx.py` — preview helper: same points as GPX waypoints (for map viewers)
 - `roadbook.example.csv` — roadbook CSV template
 - `README.md`, `LICENSE`, `BINAVI_NOTES.md` (this file)
-- `experiments/` — FIT dead end (course points ignored by the device):
-  `generate_test_fit_from_cnx.py`, `patch_fit_coursepoints.py`, `generate_test_course.py`
+- `tests/` — tests for `generate_cnx.py` and `gpx_to_roadbook.py` (`python3 -m pytest tests/`)
+- `experiments/`:
+  - `fit_fix_clock.py` + `test_fit_fix_clock.py` — repairs an activity the device appended
+    to an old unsaved recording (wrong date, days of elapsed time, phantom straight line);
+    see the README
+  - FIT dead end (course points ignored by the device): `generate_test_fit_from_cnx.py`,
+    `patch_fit_coursepoints.py`, `generate_test_course.py`
 
 Local-only (gitignored):
 - `inputs/` — your GPX tracks, roadbook CSVs, PDFs (e.g. the Giara track + `giara_roadbook.csv`)

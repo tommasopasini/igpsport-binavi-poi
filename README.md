@@ -27,7 +27,8 @@ A BiNavi route is a `.cnx` XML file in the device's `Courses/` folder. It holds 
 track (delta-encoded) and a `<Points>` list of POIs. `generate_cnx.py` takes a normal
 **GPX track** plus a **roadbook CSV** (your points, by km) and writes a `.cnx` you copy
 to the device. A round-trip self-test checks the encoded track decodes back to the GPX
-within 0.5 cm before anything is written.
+to the format's resolution — under 0.8 cm in position, 1.1 cm in elevation — before
+anything is written.
 
 ### Why not GPX or FIT?
 
@@ -50,6 +51,9 @@ what `generate_cnx.py` writes.
 
 - Python 3 (standard library only — no `pip install` needed)
 - `gpsbabel` — only for the `experiments/` FIT scripts, not for the main tool
+- `pytest` — only to run the tests (`python3 -m pytest tests/ experiments/`). Tests that
+  use your own rides in `inputs/`, `outputs/` and `device_backup/` are skipped when
+  those files aren't there.
 
 ## Usage
 
@@ -72,6 +76,9 @@ cp outputs/my_ride.cnx /mnt/d/iGPSPORT/Courses/
 Options: `--gpx`, `--roadbook`, `--out` override the defaults. With one `.gpx` in
 `inputs/` and an `inputs/roadbook.csv`, no arguments are needed.
 
+Trackpoints without an elevation get one interpolated from their neighbours along the
+track (a GPX with no elevations at all gives a flat profile, with a warning).
+
 ### From GPX waypoints (skip writing the roadbook by hand)
 
 If your GPX already carries `<wpt>` waypoints — e.g. a Komoot export that *preserved*
@@ -91,6 +98,11 @@ What it does per waypoint:
   the line (they mark a roadside fountain, not a recorded trackpoint); one farther than
   `--max-offset` (default 80 m) is still written but flagged, since that usually means
   it doesn't belong to this track.
+- **loops and out-and-back roads** — where the track passes the same spot more than
+  once (a loop's shared start/finish, a there-and-back detour), the waypoint goes on the
+  first pass at or after the previous waypoint's km. That is right when the GPX lists
+  its waypoints in route order; each such waypoint is reported with all its candidate
+  km, so check those lines if yours might not be.
 - **type** — maps the waypoint's GPX `<sym>` to the device's `<Type>` enum (see the
   table below). An unrecognised `<sym>` defaults to `waypoint` (0) and is reported, so
   you can fix that one row before generating.
@@ -129,6 +141,14 @@ See **[roadbook.example.csv](roadbook.example.csv)**. Columns:
 
 There is no "fountain" or "food" category on the device; `supply point` is the
 closest for water/feed, `shop` for a food stop.
+
+- Lines starting with `#` are comments, before or after the header (as in the example);
+  blank lines are ignored. A CSV saved from Excel ("CSV UTF-8") works as is.
+- A malformed row (missing column, non-numeric km, unknown type) stops the run with its
+  line number.
+- A `km` up to 1% past the end of the track (typically the finish line, measured
+  slightly differently by the roadbook) is placed at the finish, with a warning. One
+  further out, or negative, is rejected, and every such row is listed.
 
 **POI type legend** (the internal `<Type>` enum — *not* the app's on-screen menu order):
 
@@ -177,6 +197,22 @@ Both should show the points the same way. (A FIT-based test route, for contrast,
 nothing — that's the dead end documented above; `experiments/generate_test_course.py` builds
 one if you want to see it fail.)
 
+## Repairing a ride with the wrong date
+
+Sometimes the BiNavi keeps an unsaved recording open and appends your next ride to it.
+The ride then shows the old fragment's date in the iGPSPORT app, Strava and Komoot, with
+an elapsed time of days and a straight line from the old fragment's location.
+`experiments/fit_fix_clock.py` rewrites the activity file keeping only the real ride:
+
+```bash
+python3 experiments/fit_fix_clock.py /mnt/d/iGPSPORT/Activities/<bad>.fit
+#   -> <real start, device local time>.fit
+```
+
+Then delete the wrong activity in the app, Strava and Komoot, copy the repaired file
+into `iGPSPORT/Activities/`, and remove the bad one. The device uploads the repaired
+ride on its next sync, and the app forwards it to Strava and Komoot.
+
 ## Layout
 
 ```
@@ -185,7 +221,9 @@ gpx_to_roadbook.py     convert GPX <wpt> waypoints -> roadbook CSV (by km + type
 build_roadbook_gpx.py  preview helper: -> GPX waypoints
 roadbook.example.csv   template for your roadbook
 BINAVI_NOTES.md        reverse-engineered .cnx format + POI enum
-experiments/           FIT attempts (dead end: device ignores FIT course points)
+tests/                 tests for generate_cnx.py and gpx_to_roadbook.py
+experiments/           fit_fix_clock.py (repairs a wrongly-dated ride, with tests) +
+                       FIT course attempts (dead end: device ignores FIT course points)
 inputs/                YOUR tracks / roadbooks / PDFs        (gitignored)
 outputs/               generated .cnx / .gpx / .fit          (gitignored)
 ```
