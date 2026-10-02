@@ -169,6 +169,7 @@ def parse(data):
             off += fsize
         pos = start + off
         msg = Msg(gnum, data[start:pos], layout, endian)
+        msg.offset = start
         if offset is not None and last_ts is not None:
             msg.implied_ts = last_ts + ((offset - last_ts) & 0x1F)
         if msg.ts_raw is not None:

@@ -205,6 +205,7 @@ an elapsed time of days and a straight line from the old fragment's location.
 `experiments/fit_fix_clock.py` rewrites the activity file keeping only the real ride:
 
 ```bash
+python3 experiments/fit_analyze.py  /mnt/d/iGPSPORT/Activities/<bad>.fit   # shows the time jump
 python3 experiments/fit_fix_clock.py /mnt/d/iGPSPORT/Activities/<bad>.fit
 #   -> <real start, device local time>.fit
 ```
@@ -222,7 +223,8 @@ build_roadbook_gpx.py  preview helper: -> GPX waypoints
 roadbook.example.csv   template for your roadbook
 BINAVI_NOTES.md        reverse-engineered .cnx format + POI enum
 tests/                 tests for the three top-level scripts
-experiments/           fit_fix_clock.py (repairs a wrongly-dated ride, with tests) +
+experiments/           fit_fix_clock.py (repairs a wrongly-dated ride) + fit_inspect.py /
+                       fit_analyze.py (read-only looks at a .fit), with tests;
                        FIT course attempts (dead end: device ignores FIT course points)
 inputs/                YOUR tracks / roadbooks / PDFs        (gitignored)
 outputs/               generated .cnx / .gpx / .fit          (gitignored)

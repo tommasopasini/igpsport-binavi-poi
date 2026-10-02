@@ -184,6 +184,8 @@ Committed:
   - `fit_fix_clock.py` + `test_fit_fix_clock.py` — repairs an activity the device appended
     to an old unsaved recording (wrong date, days of elapsed time, phantom straight line);
     see the README
+  - `fit_inspect.py`, `fit_analyze.py` — read-only views of a `.fit` (gaps, events, the time
+    jump, summary field layout), on `fit_fix_clock.py`'s parser
   - FIT dead end (course points ignored by the device): `generate_test_fit_from_cnx.py`,
     `patch_fit_coursepoints.py`, `generate_test_course.py`
 

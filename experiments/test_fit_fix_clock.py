@@ -328,6 +328,8 @@ def test_matches_the_repair_that_synced():
 
 
 def test_june_ride_keeps_the_same_track_as_fit_split_day():
+    """The June repair was made by fit_split_day.py (since deleted); the track
+    must be the same."""
     old_path = REPO / "outputs" / "2026-06-13-10-17-40.fixed.fit"
     if not old_path.exists():
         pytest.skip(f"{old_path} not present (local ride data)")
