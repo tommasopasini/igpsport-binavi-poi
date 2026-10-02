@@ -71,6 +71,7 @@ class Msg:
         self.fields = fields      # fnum -> (offset_in_raw, size, base_type)
         self.endian = endian
         self.dropped = False
+        self.implied_ts = None    # set for a compressed-timestamp header (no field 253)
 
     def _slot(self, fnum):
         """(offset, struct format, invalid value, base) for a scalar field, else None."""
@@ -116,8 +117,13 @@ class Msg:
         return True
 
     @property
+    def ts_raw(self):
+        v = self.get(253)
+        return self.implied_ts if v is None else v
+
+    @property
     def ts(self):
-        return ts(self.get(253))
+        return ts(self.ts_raw)
 
 
 def parse(data):
@@ -125,12 +131,14 @@ def parse(data):
     hdr_size = data[0]
     data_size = struct.unpack("<I", data[4:8])[0]
     pos, end = hdr_size, hdr_size + data_size
-    defs, items = {}, []
+    defs, items, last_ts = {}, [], None
     while pos < end:
         start = pos
         rh = data[pos]
         pos += 1
-        if rh & 0x40:  # definition message
+        if rh & 0x80:  # compressed-timestamp header: a data message, 2-bit local type
+            local, offset = (rh >> 5) & 0x03, rh & 0x1F
+        elif rh & 0x40:  # definition message
             local = rh & 0x0F
             endian = ">" if data[pos + 1] == 1 else "<"
             gnum = struct.unpack(endian + "H", data[pos + 2:pos + 4])[0]
@@ -149,17 +157,25 @@ def parse(data):
                     pos += 3
             defs[local] = (gnum, fields, endian, dev)
             items.append(("def", bytes(data[start:pos])))
+            continue
         else:  # data message
-            local = rh & 0x0F
-            gnum, fields, endian, dev = defs[local]
-            layout, off = {}, 1  # offset 1: past the record header byte
-            for fnum, fsize, ftype in fields:
-                layout[fnum] = (off, fsize, ftype & 0x1F)
-                off += fsize
-            for fnum, fsize, ftype in dev:
-                off += fsize
-            pos = start + off
-            items.append(("msg", Msg(gnum, data[start:pos], layout, endian)))
+            local, offset = rh & 0x0F, None
+        gnum, fields, endian, dev = defs[local]
+        layout, off = {}, 1  # offset 1: past the record header byte
+        for fnum, fsize, ftype in fields:
+            layout[fnum] = (off, fsize, ftype & 0x1F)
+            off += fsize
+        for fnum, fsize, ftype in dev:
+            off += fsize
+        pos = start + off
+        msg = Msg(gnum, data[start:pos], layout, endian)
+        if offset is not None and last_ts is not None:
+            msg.implied_ts = last_ts + ((offset - last_ts) & 0x1F)
+        if msg.ts_raw is not None:
+            last_ts = msg.ts_raw
+        items.append(("msg", msg))
+    if pos != end:
+        raise FitFixError(f"FIT records overrun the data section ({pos} != {end})")
     return data[:hdr_size], items
 
 
@@ -279,16 +295,16 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
     positions = [(m.get(0), m.get(1)) for m in records
                  if m.get(0) is not None and m.get(1) is not None]
     pos0 = positions[0] if positions else None
-    new_start_raw = records[0].get(253)
+    new_start_raw = records[0].ts_raw
     new_start = records[0].ts
 
     if utc_offset_h is not None:
         utc_offset_s, utc_offset_src = round(utc_offset_h * 3600), "--utc-offset"
     else:
         act = next((m for m in msgs if m.gnum == ACTIVITY), None)
-        if act is None or act.get(5) is None or act.get(253) is None:
+        if act is None or act.get(5) is None or act.ts_raw is None:
             raise FitFixError("file has no activity.local_timestamp - pass --utc-offset")
-        utc_offset_s, utc_offset_src = act.get(5) - act.get(253), "activity.local_timestamp"
+        utc_offset_s, utc_offset_src = act.get(5) - act.ts_raw, "activity.local_timestamp"
 
     lap_ends = sorted(m.ts for m in msgs if m.gnum == LAP and m.ts)
 
@@ -304,8 +320,8 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
         old_start, old_elapsed = m.get(2), m.get(7)
         if old_start is not None and old_elapsed is not None:
             elapsed = old_start * 1000 + old_elapsed - new_start_raw * 1000
-        elif m.get(253) is not None:
-            elapsed = (m.get(253) - new_start_raw) * 1000
+        elif m.ts_raw is not None:
+            elapsed = (m.ts_raw - new_start_raw) * 1000
         else:
             elapsed = None
         if elapsed is not None:

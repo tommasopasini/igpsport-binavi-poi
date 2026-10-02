@@ -40,9 +40,10 @@ def ms(seconds):
 
 
 def build_fit(messages):
-    """[(global_num, [(field_num, type, value or None)])] -> FIT bytes."""
+    """[(global_num, [(field_num, type, value or None)][, compressed_ts])] -> FIT bytes.
+    A message with a third element gets a compressed-timestamp header for that time."""
     body, local_of = bytearray(), {}
-    for gnum, fields in messages:
+    for gnum, fields, *compressed in messages:
         layout = (gnum, tuple((f, t) for f, t, _ in fields))
         if layout not in local_of:
             local_of[layout] = len(local_of)
@@ -51,7 +52,11 @@ def build_fit(messages):
             for f, t, _ in fields:
                 fmt, base, _ = TYPES[t]
                 body += bytes([f, struct.calcsize(fmt), base])
-        body.append(local_of[layout])
+        if compressed:
+            assert local_of[layout] < 4, "compressed headers only carry local types 0-3"
+            body.append(0x80 | local_of[layout] << 5 | compressed[0] & 0x1F)
+        else:
+            body.append(local_of[layout])
         for _, t, v in fields:
             fmt, _, invalid = TYPES[t]
             body += struct.pack("<" + fmt, invalid if v is None else v)
@@ -61,9 +66,12 @@ def build_fit(messages):
     return bytes(out + struct.pack("<H", crc16(out)))
 
 
-def rec(t, dist, pos):
+def rec(t, dist, pos, compressed=False):
     lat, lon = pos if pos else (None, None)
-    return (RECORD, [(253, "u32", raw(t)), (0, "s32", lat), (1, "s32", lon), (5, "u32", dist)])
+    fields = [(0, "s32", lat), (1, "s32", lon), (5, "u32", dist)]
+    if compressed:
+        return (RECORD, fields, raw(t))
+    return (RECORD, [(253, "u32", raw(t))] + fields)
 
 
 def ev(t, ev_type):
@@ -93,14 +101,15 @@ def ride_dist(k):
 
 
 def build_ride(*, lap_in_stale=False, stale_stop=True, first_kept_blank=False,
-               local_offset_s=3600, summary_invalid=False, stale=True, standing_s=0):
+               local_offset_s=3600, summary_invalid=False, stale=True, standing_s=0,
+               compressed=False):
     """21 s / 20 m stale fragment at T0, then a 100 s ride starting at T1.
     Session timer = 20 s stale + 100 s ride."""
     msgs = [(FILE_ID, [(0, "enum", 4), (1, "u16", 1), (4, "u32", raw(T0 if stale else T1))])]
     if stale:
         msgs.append(ev(T0, 0))
         for k in range(21):
-            msgs.append(rec(T0 + timedelta(seconds=k), 100 * k, A))
+            msgs.append(rec(T0 + timedelta(seconds=k), 100 * k, A, compressed))
             if lap_in_stale and k == 10:   # lap button pressed inside the fragment
                 msgs.append(summary(LAP, T0 + timedelta(seconds=10), T0, 10, 1000))
         if stale_stop:
@@ -109,7 +118,7 @@ def build_ride(*, lap_in_stale=False, stale_stop=True, first_kept_blank=False,
     for k in range(1, 101):
         t = T1 + timedelta(seconds=k)
         blank = first_kept_blank and k == 1
-        msgs.append(rec(t, None if blank else ride_dist(k), None if blank else ride_pos(k)))
+        msgs.append(rec(t, None if blank else ride_dist(k), None if blank else ride_pos(k), compressed))
         if lap_in_stale and k == 50:
             msgs.append(summary(LAP, t, T0 + timedelta(seconds=10), 60, ride_dist(50) - 1000))
     end = T1 + timedelta(seconds=100)
@@ -222,6 +231,17 @@ def test_missing_local_timestamp_needs_explicit_offset():
     with pytest.raises(FitFixError, match="--utc-offset"):
         repair(data)
     assert repair(data, utc_offset_h=1).filename == "2026-09-13-07-00-01.fit"
+
+
+def test_compressed_timestamp_records_are_parsed_and_kept():
+    r = repair(build_ride(compressed=True))
+    assert_crcs(r.data)
+    records = of(r.data, RECORD)                     # re-parsed from the repaired file
+    assert [m.ts for m in records] == [T1 + timedelta(seconds=k) for k in range(1, 101)]
+    assert all(m.get(253) is None for m in records)  # still compressed, still anchored
+    (session,) = of(r.data, SESSION)
+    assert ts(session.get(2)) == T1 + timedelta(seconds=1) and session.get(7) == 99_000
+    assert r.dropped["record"] == 21
 
 
 def test_ride_without_stale_fragment_is_rejected():
