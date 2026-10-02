@@ -15,6 +15,11 @@ The waypoint usually sits a few metres off the track (it marks a fountain at the
 roadside, not a recorded trackpoint); it is snapped to the nearest point on the
 track. A waypoint farther than --max-offset (default 80 m) is still written but
 flagged, since that often means it doesn't belong to this track.
+
+On a loop or out-and-back track the same spot is passed more than once. Every
+pass is found, and the waypoint goes on the first one at or after the previous
+waypoint's km, so waypoints listed in route order land on the right pass; such
+waypoints are reported with all their candidate km so you can check.
 """
 import argparse
 import csv
@@ -26,6 +31,10 @@ from generate_cnx import INPUTS, OUTPUTS, NS, hav, TYPE_BY_NAME
 
 NAME_BY_TYPE = {code: name for name, code in TYPE_BY_NAME.items()}
 R = 6371000.0
+# Repeat passes of the same road sit within a few metres of each other (GPS noise,
+# opposite lanes); a neighbouring stretch, like the next leg of a switchback, is
+# farther (17 m on Giara), and must not count as a pass.
+PASS_SLACK_M = 10.0
 
 # GPX <sym> (lower-cased) -> internal <Type> code. Inverse of build_roadbook_gpx's
 # SYM_BY_TYPE, plus common Komoot/Garmin symbol names. Unknown syms fall back to
@@ -64,30 +73,46 @@ def read_waypoints(path):
     return wpts
 
 
-def project_km(wlat, wlon, pts, cum):
-    """Snap (wlat,wlon) to the nearest point on the track. Returns (km, offset_m).
+def track_passes(wlat, wlon, pts, cum):
+    """Every pass of the track by (wlat, wlon), as [(km, offset_m)] in km order.
 
     Uses a local planar frame centred on the waypoint, projecting onto each track
-    segment and clamping to it, so the km is taken at the true closest point.
+    segment and clamping to it, so the km is taken at the true closest point. A
+    pass is a run of consecutive segments within PASS_SLACK_M of the nearest
+    approach, represented by its closest point; a loop's shared start/finish or
+    an out-and-back road yields two.
     """
     cosw = math.cos(math.radians(wlat))
 
     def xy(lat, lon):
         return (math.radians(lon - wlon) * cosw * R, math.radians(lat - wlat) * R)
 
-    best = (float("inf"), 0.0)  # (offset_m, km)
+    segs = []  # (offset_m, km) of the closest point on each segment
     for i in range(1, len(pts)):
         ax, ay = xy(*pts[i - 1])
         bx, by = xy(*pts[i])
         abx, aby = bx - ax, by - ay
         denom = abx * abx + aby * aby
         t = 0.0 if denom == 0 else max(0.0, min(1.0, -(ax * abx + ay * aby) / denom))
-        px, py = ax + t * abx, ay + t * aby
-        off = math.hypot(px, py)
-        if off < best[0]:
-            km = (cum[i - 1] + t * (cum[i] - cum[i - 1])) / 1000.0
-            best = (off, km)
-    return best[1], best[0]
+        off = math.hypot(ax + t * abx, ay + t * aby)
+        segs.append((off, (cum[i - 1] + t * (cum[i] - cum[i - 1])) / 1000.0))
+    near = min(off for off, _ in segs) + PASS_SLACK_M
+    passes, run = [], None
+    for off, km in segs:
+        if off <= near:
+            if run is None or off < run[1]:
+                run = (km, off)
+        elif run is not None:
+            passes.append(run)
+            run = None
+    if run is not None:
+        passes.append(run)
+    return passes
+
+
+def choose_pass(passes, prev_km):
+    """The first pass at or after prev_km, else the last one."""
+    return next((p for p in passes if p[0] >= prev_km), passes[-1])
 
 
 def main():
@@ -115,16 +140,18 @@ def main():
         raise SystemExit(f"{gpx.name}: no <wpt> waypoints to convert")
     print(f"Track: {len(pts)} points, {cum[-1] / 1000:.2f} km   Waypoints: {len(wpts)}")
 
-    rows = []  # (km, type_name, description, sym, offset, known)
-    for wlat, wlon, name, sym in wpts:
-        km, off = project_km(wlat, wlon, pts, cum)
+    rows = []  # (km, type_name, description, sym, offset, known, passes)
+    prev_km = 0.0
+    for wlat, wlon, name, sym in wpts:  # in file order: route order decides the pass
+        passes = track_passes(wlat, wlon, pts, cum)
+        km, off = choose_pass(passes, prev_km)
+        prev_km = km
         code = TYPE_BY_SYM.get(sym.lower())
         known = code is not None
-        rows.append((km, NAME_BY_TYPE[code if known else 0], name or "(unnamed)", sym, off, known))
+        rows.append((km, NAME_BY_TYPE[code if known else 0], name or "(unnamed)", sym, off, known, passes))
     rows.sort(key=lambda r: r[0])
 
-    # Header MUST be the first line: generate_cnx's csv.DictReader treats line 1 as
-    # the fieldnames, and skips later rows whose km column starts with "#".
+    # generate_cnx.read_roadbook skips the "#" comment rows below the header.
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["km", "type", "description"])
@@ -133,10 +160,13 @@ def main():
         for km, type_name, descr, *_ in rows:
             w.writerow([f"{km:.2f}", type_name, descr])
 
-    for km, type_name, descr, sym, off, known in rows:
+    for km, type_name, descr, sym, off, known, passes in rows:
         flag = "  <-- FAR FROM TRACK" if off > args.max_offset else ""
         symnote = f"sym={sym!r}" + ("" if known else " -> unmapped, defaulted to 'waypoint'")
         print(f"  {km:7.2f} km  {type_name:16s} {descr!r:28s} [{symnote}] offset {off:.0f} m{flag}")
+        if len(passes) > 1:
+            kms = ", ".join(f"{p[0]:.2f}" for p in passes)
+            print(f"             track passes here {len(passes)}x (km {kms}) - picked {km:.2f} by waypoint order")
 
     print(f"\nWrote {out}  ({len(rows)} points)")
     print(f"Next:  python generate_cnx.py --gpx {gpx} --roadbook {out}")
