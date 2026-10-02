@@ -4,8 +4,9 @@ roadbook CSV of points-of-interest, so the points show up on the device during
 navigation (something the official app makes hard).
 
 Track encoding: lat/lon as 2nd-order delta (1e-7 deg), elevation as 1st-order
-delta (cm) — see docs in BINAVI_NOTES.md. A round-trip self-test asserts the
-re-decoded track matches the GPX to < 0.5 cm before the file is written.
+delta (cm) — see docs in BINAVI_NOTES.md. A round-trip self-test checks the
+re-decoded track matches the GPX to the format's resolution (under 0.8 cm in
+position, 1.1 cm in elevation) before the file is written.
 
 Usage:
     python generate_cnx.py [--gpx PATH] [--roadbook PATH] [--out PATH]
@@ -16,10 +17,14 @@ Defaults (so day-to-day work stays entirely local):
     --out       ./outputs/<gpx-name>.cnx
 
 Roadbook CSV columns: km,type,description   (see roadbook.example.csv)
-`type` is a category name (case-insensitive) or its integer code.
+`type` is a category name (case-insensitive) or its integer code. Lines starting
+with "#" are comments, blank lines are ignored. A km past the end of the track
+is placed at the finish when within 1% of the track length, rejected otherwise.
 """
 import argparse
+import bisect
 import csv
+import hashlib
 import math
 import sys
 from pathlib import Path
@@ -41,6 +46,12 @@ TYPE_BY_NAME = {
     "instagram-worthy location": 16, "tunnel": 17, "valley": 18,
     "dangerous road": 19, "sharp turn": 20, "steep slope": 21, "intersection": 22,
 }
+ROADBOOK_COLUMNS = ("km", "type", "description")
+# The format's resolution: lat/lon on a 1e-7 deg grid are at most sqrt(2) * 0.5e-7 deg
+# (0.79 cm) off; elevation in cm steps from a mm start value at most 0.5 + 0.5 + 0.05 cm.
+POS_TOL_M = 0.008
+ELE_TOL_M = 0.011
+KM_TOLERANCE = 0.01  # a roadbook may run 1% past the GPX end (e.g. the finish line)
 
 
 def hav(a, b, c, d):
@@ -64,24 +75,92 @@ def resolve_type(value):
     return code
 
 
+def cumulative(pts):
+    cum = [0.0]
+    for i in range(1, len(pts)):
+        cum.append(cum[-1] + hav(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]))
+    return cum
+
+
 def read_gpx(path):
-    pts = []  # (lat, lon, ele_m)
-    for tp in ET.parse(path).getroot().iter(f"{{{NS}}}trkpt"):
+    pts = []  # (lat, lon, ele_m or None)
+    for i, tp in enumerate(ET.parse(path).getroot().iter(f"{{{NS}}}trkpt")):
         la, lo = float(tp.get("lat")), float(tp.get("lon"))
         e = tp.find(f"{{{NS}}}ele")
-        pts.append((la, lo, float(e.text) if e is not None else 0.0))
+        text = (e.text or "").strip() if e is not None else ""
+        try:
+            ele = float(text) if text else None
+        except ValueError:
+            raise SystemExit(f"{path}: trackpoint {i}: elevation {text!r} is not a number")
+        pts.append((la, lo, ele))
     if len(pts) < 2:
         raise SystemExit(f"{path}: need at least 2 trackpoints, found {len(pts)}")
-    return pts
+    return fill_elevations(pts)
+
+
+def fill_elevations(pts):
+    """Give trackpoints without <ele> a value interpolated along the track between
+    the nearest known neighbours (the nearest known value at either end), instead
+    of 0 m, which would drop the profile to sea level and inflate ascent/descent."""
+    known = [i for i, p in enumerate(pts) if p[2] is not None]
+    missing = len(pts) - len(known)
+    if not missing:
+        return pts
+    if not known:
+        print("warning: the GPX has no elevations - the profile will be flat (0 m)")
+        return [(la, lo, 0.0) for la, lo, _ in pts]
+    cum = cumulative(pts)
+    ele = [p[2] for p in pts]
+    for i, e in enumerate(ele):
+        if e is not None:
+            continue
+        k = bisect.bisect(known, i)
+        a = known[k - 1] if k > 0 else None
+        b = known[k] if k < len(known) else None
+        if a is None or b is None:
+            ele[i] = pts[b if a is None else a][2]
+        else:
+            span = cum[b] - cum[a]
+            f = 0.0 if span == 0 else (cum[i] - cum[a]) / span
+            ele[i] = pts[a][2] + (pts[b][2] - pts[a][2]) * f
+    print(f"note: {missing} trackpoint(s) without elevation, interpolated from their neighbours")
+    return [(la, lo, e) for (la, lo, _), e in zip(pts, ele)]
 
 
 def read_roadbook(path):
-    rows = []
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("km") is None or row["km"].strip().startswith("#"):
+    """[(km, type_code, description)]. The header may follow comment lines;
+    any line whose first cell starts with "#" is a comment, blank lines are
+    skipped, and a byte-order mark (Excel "CSV UTF-8") is ignored."""
+    rows, idx = [], None
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        for cells in reader:
+            cells = [c.strip() for c in cells]
+            if not any(cells) or cells[0].startswith("#"):
                 continue
-            rows.append((float(row["km"]), resolve_type(row["type"]), row["description"].strip()))
+            where = f"{path}:{reader.line_num}"
+            if idx is None:
+                header = [c.lower() for c in cells]
+                missing = [c for c in ROADBOOK_COLUMNS if c not in header]
+                if missing:
+                    raise SystemExit(f"{where}: header {cells} lacks {', '.join(missing)} "
+                                     f"(expected {','.join(ROADBOOK_COLUMNS)})")
+                idx = [header.index(c) for c in ROADBOOK_COLUMNS]
+                continue
+            if len(cells) <= max(idx):
+                raise SystemExit(f"{where}: expected {','.join(ROADBOOK_COLUMNS)}, got {cells}")
+            km_s, type_s, descr = (cells[i] for i in idx)
+            try:
+                km = float(km_s)
+            except ValueError:
+                raise SystemExit(f"{where}: km {km_s!r} is not a number")
+            try:
+                code = resolve_type(type_s)
+            except SystemExit as e:
+                raise SystemExit(f"{where}: {e}")
+            rows.append((km, code, descr))
+    if idx is None:
+        raise SystemExit(f"{path}: no header row (expected {','.join(ROADBOOK_COLUMNS)})")
     return rows
 
 
@@ -127,6 +206,54 @@ def decode_tracks(tracks):
     return out
 
 
+def check_round_trip(pts, tracks):
+    """Decode `tracks` as the device does and exit unless it matches `pts` to the
+    format's resolution. Returns (max position error, max elevation error) in m."""
+    dec = decode_tracks(tracks)
+    if len(dec) != len(pts):
+        raise SystemExit(f"self-test failed: decoded {len(dec)} points, expected {len(pts)}")
+    pos = max(hav(p[0], p[1], d[0], d[1]) for p, d in zip(pts, dec))
+    ele = max(abs(p[2] - d[2]) for p, d in zip(pts, dec))
+    if pos > POS_TOL_M or ele > ELE_TOL_M:
+        raise SystemExit(f"self-test failed: max position error {pos * 100:.2f} cm (limit {POS_TOL_M * 100:g}), "
+                         f"max elevation error {ele * 100:.2f} cm (limit {ELE_TOL_M * 100:g}) - .cnx not written")
+    return pos, ele
+
+
+def point_at_km(pts, cum, km):
+    """(lat, lon) at `km` along the track, clamped to its ends."""
+    t = min(max(km * 1000.0, 0.0), cum[-1])
+    i = max(1, bisect.bisect_left(cum, t))
+    d0, d1 = cum[i - 1], cum[i]
+    f = 0.0 if d1 == d0 else (t - d0) / (d1 - d0)
+    (a_lat, a_lon, _), (b_lat, b_lon, _) = pts[i - 1], pts[i]
+    return a_lat + (b_lat - a_lat) * f, a_lon + (b_lon - a_lon) * f
+
+
+def place_points(rows, pts, cum):
+    """[(lat, lon, type, description)] for the roadbook rows. Exits listing every
+    row whose km is negative or more than KM_TOLERANCE past the track end."""
+    total = cum[-1]
+    bad = [(km, d) for km, _, d in rows if km < 0 or km * 1000 > total * (1 + KM_TOLERANCE)]
+    if bad:
+        listing = "\n".join(f"  km {km:g}: {d}" for km, d in bad)
+        raise SystemExit(f"roadbook km outside the {total / 1000:.2f} km track:\n{listing}")
+    placed = []
+    for km, typ, d in rows:
+        if km * 1000 > total:
+            print(f"warning: km {km:g} ({d}) is past the {total / 1000:.2f} km track end - placed at the finish")
+        placed.append((*point_at_km(pts, cum, km), typ, d))
+    return placed
+
+
+def route_id(tracks, points_xml):
+    """8-digit numeric <Id> (the shape the device is known to accept) derived from
+    the route content: a different track or any changed point gives a different Id,
+    bar a 1-in-90-million collision."""
+    digest = hashlib.sha1((tracks + "".join(points_xml)).encode()).hexdigest()
+    return 10_000_000 + int(digest, 16) % 90_000_000
+
+
 def main():
     ap = argparse.ArgumentParser(description="GPX + roadbook CSV -> native iGPSPORT .cnx")
     ap.add_argument("--gpx", type=Path, help="input GPX track (default: the one in ./inputs)")
@@ -157,41 +284,22 @@ def main():
     # --- read + geometry ---
     pts = read_gpx(gpx)
     n = len(pts)
-    cum = [0.0]
-    for i in range(1, n):
-        cum.append(cum[-1] + hav(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]))
+    cum = cumulative(pts)
     total_m = cum[-1]
     ascent = sum(max(0, pts[i][2] - pts[i - 1][2]) for i in range(1, n))
     descent = sum(min(0, pts[i][2] - pts[i - 1][2]) for i in range(1, n))
 
     # --- encode track + self-test round-trip ---
     tracks_str = encode_tracks(pts)
-    dec = decode_tracks(tracks_str)
-    assert len(dec) == n, f"count mismatch {len(dec)} != {n}"
-    max_pos_err = max(hav(pts[i][0], pts[i][1], dec[i][0], dec[i][1]) for i in range(n))
-    max_ele_err = max(abs(pts[i][2] - dec[i][2]) for i in range(n))
+    max_pos_err, max_ele_err = check_round_trip(pts, tracks_str)
     print(f"SELF-TEST round-trip:  max position error = {max_pos_err * 100:.2f} cm   max elevation error = {max_ele_err * 100:.1f} cm")
-    assert max_pos_err < 0.5, "position error too large!"
-    assert max_ele_err < 0.5, "elevation error too large!"
 
-    # --- interpolate roadbook points by km ---
-    def at_km(km):
-        t = km * 1000.0
-        if t <= 0:
-            return pts[0][0], pts[0][1]
-        if t >= total_m:
-            return pts[-1][0], pts[-1][1]
-        for i in range(1, n):
-            if cum[i - 1] <= t <= cum[i]:
-                d0, d1 = cum[i - 1], cum[i]
-                f = 0.0 if d1 == d0 else (t - d0) / (d1 - d0)
-                return pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * f, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * f
-        return pts[-1][0], pts[-1][1]
-
+    # --- place roadbook points by km ---
     rows = read_roadbook(roadbook) if roadbook else []
+    if roadbook and not rows:
+        print(f"warning: {roadbook} has a header but no points")
     points_xml = []
-    for km, typ, descr in rows:
-        la, lo = at_km(km)
+    for la, lo, typ, descr in place_points(rows, pts, cum):
         d = descr.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         points_xml.append(f"<Point><Lat>{la:.7f}</Lat><Lng>{lo:.7f}</Lng><Type>{typ}</Type><Descr>{d}</Descr></Point>")
 
@@ -199,7 +307,7 @@ def main():
     xml = (
         "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>\n"
         "<Route>"
-        "<Id>20260000</Id>"
+        f"<Id>{route_id(tracks_str, points_xml)}</Id>"
         f"<Distance>{total_m:.2f}</Distance>"
         "<Duration></Duration>"
         f"<Ascent>{round(ascent)}</Ascent>"
