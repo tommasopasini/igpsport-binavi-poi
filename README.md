@@ -210,6 +210,12 @@ python3 experiments/fit_fix_clock.py /mnt/d/iGPSPORT/Activities/<bad>.fit
 #   -> <real start, device local time>.fit
 ```
 
+It drops every short stale fragment before the ride, rebuilds the summary (times,
+distance, heart rate, cadence, altitude, calories) for the ride alone, and names the
+file after its true start. A stretch longer than 15 minutes before a time jump is taken
+for real riding and the tool stops; raise `--max-stale-minutes` if it really is a
+forgotten recording.
+
 Then delete the wrong activity in the app, Strava and Komoot, copy the repaired file
 into `iGPSPORT/Activities/`, and remove the bad one. The device uploads the repaired
 ride on its next sync, and the app forwards it to Strava and Komoot.

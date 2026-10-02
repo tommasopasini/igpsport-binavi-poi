@@ -8,7 +8,10 @@ start time (and the old start position), and total_elapsed_time spans the whole
 gap between the two days. Apps then date the ride wrongly and draw a straight
 line from the old fragment's location to the new one.
 
-This rewrites the file keeping only the segment after the time discontinuity:
+This rewrites the file keeping only the ride after the stale fragment(s): every
+short (at most --max-stale-minutes) stretch before a forward time jump of more
+than --gap-hours is stale; the first longer stretch is the ride, and any later
+jump (an overnight stop in a multi-day ride) is left alone.
   * drops the stale data messages and any lap that ended inside the stale head
     (definitions are kept, they are still used)
   * rebases record distances so the ride starts at 0
@@ -17,7 +20,14 @@ This rewrites the file keeping only the segment after the time discontinuity:
     start moves), total_timer_time, total_moving_time, total_distance and avg
     speed lose exactly the stale share; the session bounding box is recomputed.
     Laps that start after the jump are left untouched.
-  * fixes file_id.time_created, device_info.timestamp, activity timer
+  * the same summaries' statistics: heart rate, cadence, max speed/power and max
+    temperature are recomputed from the kept records with the device's own rules
+    (verified on BiNavi rides); altitude and average temperature, which the
+    device smooths, are recomputed only where the stale fragment pushed them
+    outside the kept records' range; calories and cycles are scaled by the
+    remaining timer; ascent/descent lose the fragment's own climb (an estimate);
+    session num_laps loses the dropped laps. Average power is left as is.
+  * fixes stale file_id.time_created and device_info.timestamp, activity timer
   * recomputes header CRC and file CRC
   * names the output after the true start in device local time, read from
     activity.local_timestamp (override with --utc-offset)
@@ -25,6 +35,7 @@ This rewrites the file keeping only the segment after the time discontinuity:
 Read-only on the input; writes a new file.
 """
 import argparse
+import math
 import struct
 import sys
 from collections import Counter
@@ -36,7 +47,7 @@ BASE_SIZE = {0: 1, 1: 1, 2: 1, 3: 2, 4: 2, 5: 4, 6: 4, 7: 1,
              8: 4, 9: 8, 10: 1, 11: 2, 12: 4, 13: 1, 14: 8, 15: 8, 16: 8}
 FMT = {(1, False): "B", (2, False): "H", (4, False): "I", (8, False): "Q",
        (1, True): "b", (2, True): "h", (4, True): "i", (8, True): "q"}
-SIGNED = {1, 3, 5}
+SIGNED = {1, 3, 5, 14}
 ZERO_INVALID = {10, 11, 12, 16}          # uint8z/16z/32z/64z use 0 as "no value"
 FILE_ID, DEVICE_INFO, RECORD, EVENT, LAP, SESSION, ACTIVITY = 0, 23, 20, 21, 19, 18, 34
 MSG_NAME = {RECORD: "record", EVENT: "event", LAP: "lap"}
@@ -45,6 +56,31 @@ TIMER_EVENT, START = 0, 0
 STOP_TYPES = {1, 4, 8, 9}                # stop, stop_all, stop_disable, stop_disable_all
 MOVING_TIME = {LAP: 52, SESSION: 59}
 AVG_SPEED = {LAP: (13, 110), SESSION: (14, 124)}   # avg_speed, enhanced_avg_speed
+ASCENT = {LAP: (21, 22), SESSION: (22, 23)}         # total_ascent, total_descent
+CALORIES, CYCLES, NUM_LAPS = 11, 10, 26
+SYSTEM_TIME_LIMIT = 0x10000000   # a FIT date_time below this counts seconds since power-on
+CLIMB_STEP_M = 1.0               # altitude hysteresis for the stale fragment's climb
+# Recomputed from the kept records with the device's rule, verified on real BiNavi
+# rides: (lap field, session field, record fields in order of preference, rule).
+EXACT_STATS = (
+    (15, 16, (3,), "floor_mean"),            # avg_heart_rate (130.94 -> 130)
+    (16, 17, (3,), "max"),                   # max_heart_rate
+    (63, 64, (3,), "min"),                   # min_heart_rate
+    (17, 18, (4,), "floor_mean_nonzero"),    # avg_cadence (zeros excluded, 67.50 -> 67)
+    (18, 19, (4,), "max"),                   # max_cadence
+    (14, 15, (73, 6), "max"),                # max_speed
+    (111, 125, (73, 6), "max"),              # enhanced_max_speed
+    (20, 21, (7,), "max"),                   # max_power
+    (51, 58, (13,), "max"),                  # max_temperature
+)
+# Smoothed by the device, so kept unless outside what the kept records allow (the
+# stale fragment's altitude drags them), then recomputed from those records.
+BOUNDED_STATS = (
+    (43, 50, (2, 78), "max"),                # max_altitude
+    (62, 71, (2, 78), "min"),                # min_altitude
+    (42, 49, (2, 78), "mean"),               # avg_altitude
+    (50, 57, (13,), "mean"),                 # avg_temperature
+)
 
 
 class FitFixError(Exception):
@@ -117,9 +153,16 @@ class Msg:
         return True
 
     @property
-    def ts_raw(self):
+    def time(self):
+        """Raw date_time from field 253 or the compressed header, absolute or not."""
         v = self.get(253)
         return self.implied_ts if v is None else v
+
+    @property
+    def ts_raw(self):
+        """Absolute date_time, or None (also for system time since power-on)."""
+        v = self.time
+        return v if v is not None and v >= SYSTEM_TIME_LIMIT else None
 
     @property
     def ts(self):
@@ -172,8 +215,8 @@ def parse(data):
         msg.offset = start
         if offset is not None and last_ts is not None:
             msg.implied_ts = last_ts + ((offset - last_ts) & 0x1F)
-        if msg.ts_raw is not None:
-            last_ts = msg.ts_raw
+        if msg.time is not None:
+            last_ts = msg.time
         items.append(("msg", msg))
     if pos != end:
         raise FitFixError(f"FIT records overrun the data section ({pos} != {end})")
@@ -193,18 +236,39 @@ def crc16(data, crc=0):
     return crc
 
 
-def find_jump(msgs, gap_hours):
-    """(last stale timestamp, first resumed timestamp) at the first forward jump
-    larger than gap_hours between timestamped messages, or None."""
-    prev = None
+def find_jumps(msgs, gap_hours):
+    """[(timestamp before, timestamp after)] for every forward jump larger than
+    gap_hours between messages with an absolute timestamp, in file order."""
+    jumps, prev = [], None
     for m in msgs:
         t = m.ts
         if t is None:
             continue
         if prev is not None and (t - prev).total_seconds() > gap_hours * 3600:
-            return prev, t
+            jumps.append((prev, t))
         prev = t
-    return None
+    return jumps
+
+
+def stale_cut(msgs, gap_hours, max_stale_minutes):
+    """(last stale timestamp, first ride timestamp): the end of the run of short
+    stretches - stale fragments - that precede the ride, each followed by a jump
+    of more than gap_hours."""
+    jumps = find_jumps(msgs, gap_hours)
+    if not jumps:
+        raise FitFixError(f"no time jump > {gap_hours}h found - nothing to fix")
+    start = next(m.ts for m in msgs if m.ts)
+    cut = None
+    for before, after in jumps:
+        span_min = (before - start).total_seconds() / 60
+        if span_min > max_stale_minutes:
+            break
+        cut, start = (before, after), after
+    if cut is None:
+        raise FitFixError(f"the part before the jump at {jumps[0][1]} spans {span_min:.0f} min, "
+                          f"longer than a stale fragment (--max-stale-minutes {max_stale_minutes:g}); "
+                          "raise the limit if it really is one")
+    return cut
 
 
 def timer_spans(msgs, before, after):
@@ -235,6 +299,41 @@ def seconds_after(spans, lo):
     return total
 
 
+def samples(records, fields):
+    """Each record's value of the first of `fields` it has."""
+    out = []
+    for r in records:
+        v = next((r.get(f) for f in fields if r.get(f) is not None), None)
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def summarize(values, rule):
+    if rule == "max":
+        return max(values)
+    if rule == "min":
+        return min(values)
+    if rule == "floor_mean":
+        return math.floor(sum(values) / len(values))
+    if rule == "floor_mean_nonzero":
+        nonzero = [v for v in values if v]
+        return math.floor(sum(nonzero) / len(nonzero)) if nonzero else None
+    return round(sum(values) / len(values))
+
+
+def climb(altitudes, step):
+    """(ascent, descent) in the altitudes' own units, counting moves of at least `step`."""
+    up = down = 0
+    ref = altitudes[0] if altitudes else None
+    for a in altitudes[1:]:
+        if a - ref >= step:
+            up, ref = up + a - ref, a
+        elif ref - a >= step:
+            down, ref = down + ref - a, a
+    return up, down
+
+
 @dataclass
 class Result:
     data: bytes
@@ -257,14 +356,10 @@ class Result:
         return f"{self.local_start:%Y-%m-%d-%H-%M-%S}.fit"
 
 
-def repair(data, gap_hours=6.0, utc_offset_h=None):
+def repair(data, gap_hours=6.0, utc_offset_h=None, max_stale_minutes=15.0):
     header, items = parse(data)
     msgs = [it for kind, it in items if kind == "msg"]
-
-    jump = find_jump(msgs, gap_hours)
-    if jump is None:
-        raise FitFixError(f"no time jump > {gap_hours}h found - nothing to fix")
-    before, after = jump
+    before, after = stale_cut(msgs, gap_hours, max_stale_minutes)
 
     def stale(m):
         return m.ts is not None and m.ts < after
@@ -308,6 +403,7 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
         utc_offset_s, utc_offset_src = act.get(5) - act.ts_raw, "activity.local_timestamp"
 
     lap_ends = sorted(m.ts for m in msgs if m.gnum == LAP and m.ts)
+    stale_laps = sum(1 for m in msgs if m.gnum == LAP and stale(m))
 
     def patch_summary(m):
         # the stale share of this message: everything after the previous lap's end
@@ -332,10 +428,14 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
             m.set(3, pos0[0])
             m.set(4, pos0[1])
 
-        timer = m.get(8)
+        old_timer = timer = m.get(8)
         if timer is not None:
             timer = max(0, timer - stale_ms)
             m.set(8, timer)
+        if old_timer and timer is not None:           # calories, cycles: by timer share
+            for f in (CALORIES, CYCLES):
+                if m.get(f) is not None:
+                    m.set(f, round(m.get(f) * timer / old_timer))
         dist = m.get(9)
         if dist is not None:
             dist = max(0, dist - stale_cm)
@@ -355,6 +455,31 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
             for f in AVG_SPEED[m.gnum]:
                 if m.get(f) is not None and m.fits(f, avg):
                     m.set(f, avg)
+
+        # statistics over the records this summary keeps (a lap: up to its end)
+        kept = [r for r in records if m.gnum == SESSION or r.ts <= m.ts]
+        which = 0 if m.gnum == LAP else 1
+        for stat in EXACT_STATS:
+            f, values = stat[which], samples(kept, stat[2])
+            if m.get(f) is not None and values:
+                v = summarize(values, stat[3])
+                if m.fits(f, v):
+                    m.set(f, v)
+        for stat in BOUNDED_STATS:
+            f, values = stat[which], samples(kept, stat[2])
+            v = m.get(f)
+            if v is not None and values and not min(values) <= v <= max(values):
+                v = summarize(values, stat[3])
+                if m.fits(f, v):
+                    m.set(f, v)
+        # altitude raw units are 1/5 m: the fragment's own climb, from where this summary's
+        # stale share starts
+        dropped_alts = samples([r for r in stale_records if window is None or r.ts > window], (2, 78))
+        for f, gain in zip(ASCENT[m.gnum], climb(dropped_alts, CLIMB_STEP_M * 5)):
+            if m.get(f) is not None:
+                m.set(f, max(0, m.get(f) - round(gain / 5)))
+        if m.gnum == SESSION and m.get(NUM_LAPS) is not None:
+            m.set(NUM_LAPS, max(0, m.get(NUM_LAPS) - stale_laps))
         return elapsed
 
     dropped = Counter()
@@ -373,9 +498,12 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
         elif m.gnum == SESSION:
             session_elapsed = patch_summary(m)
         elif m.gnum == FILE_ID:
-            m.set(4, new_start_raw)                       # time_created
+            created = ts(m.get(4))
+            if created is not None and m.get(4) >= SYSTEM_TIME_LIMIT and created < after:
+                m.set(4, new_start_raw)                   # time_created
         elif m.gnum == DEVICE_INFO:
-            m.set(253, new_start_raw)
+            if stale(m):
+                m.set(253, new_start_raw)
         elif m.gnum == ACTIVITY:
             timer = m.get(0)
             if timer is not None:
@@ -396,7 +524,8 @@ def repair(data, gap_hours=6.0, utc_offset_h=None):
             body += it.raw
     out = bytearray(header)
     struct.pack_into("<I", out, 4, len(body))
-    struct.pack_into("<H", out, 12, crc16(out[:12]))
+    if len(header) >= 14:                                 # a 12-byte header has no CRC
+        struct.pack_into("<H", out, 12, crc16(out[:12]))
     out += body
     out += struct.pack("<H", crc16(out))
 
@@ -414,12 +543,15 @@ def main():
     ap.add_argument("--utc-offset", type=float, default=None,
                     help="device local-time offset in hours, used only for the derived "
                          "filename (default: read from the file's activity.local_timestamp)")
+    ap.add_argument("--max-stale-minutes", type=float, default=15.0,
+                    help="longest stretch before a jump still treated as a stale fragment "
+                         "(default 15); a longer one is the ride itself")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     data = open(args.src, "rb").read()
     try:
-        r = repair(data, args.gap_hours, args.utc_offset)
+        r = repair(data, args.gap_hours, args.utc_offset, args.max_stale_minutes)
     except FitFixError as e:
         sys.exit(str(e))
 

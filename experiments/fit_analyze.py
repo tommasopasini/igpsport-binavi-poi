@@ -3,14 +3,15 @@
 record, where the recording jumps (a stale fragment, see fit_fix_clock.py), and
 the exact field layout (offsets) of session/lap/activity messages.
 
-Usage: python experiments/fit_analyze.py FILE.fit [--gap-hours 6]
+Usage: python experiments/fit_analyze.py FILE.fit [--gap-hours 6] [--max-stale-minutes 15]
 """
 import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fit_fix_clock import ACTIVITY, EVENT, LAP, RECORD, SESSION, find_jump, parse, ts  # noqa: E402
+from fit_fix_clock import (ACTIVITY, EVENT, LAP, RECORD, SESSION, FitFixError,  # noqa: E402
+                           find_jumps, parse, stale_cut, ts)
 
 EVENT_TYPE = {0: "start", 1: "stop", 2: "consecutive_dp", 3: "marker",
               4: "stop_all", 8: "stop_disable", 9: "stop_disable_all"}
@@ -21,7 +22,9 @@ def main():
     ap = argparse.ArgumentParser(description="read-only FIT event/record/summary analysis")
     ap.add_argument("fit")
     ap.add_argument("--gap-hours", type=float, default=6.0,
-                    help="forward time jump reported as a stale fragment (default 6)")
+                    help="forward time jump reported (default 6)")
+    ap.add_argument("--max-stale-minutes", type=float, default=15.0,
+                    help="longest stretch before a jump treated as a stale fragment (default 15)")
     args = ap.parse_args()
     msgs = [m for kind, m in parse(open(args.fit, "rb").read())[1] if kind == "msg"]
 
@@ -35,16 +38,22 @@ def main():
     if records:
         print(f"  first record: {records[0].ts}")
         print(f"  last  record: {records[-1].ts}")
-    jump = find_jump(msgs, args.gap_hours)
-    if jump:
-        before, after = jump
-        kept = [m for m in records if m.ts >= after]
-        print(f"  time jump: {before} -> {after} ({(after - before).total_seconds() / 3600:.1f} h)")
-        print(f"    records before it: {len(records) - len(kept)}, after it: {len(kept)}")
-        if kept:
-            print(f"    first record after the jump: {kept[0].ts}")
-    else:
+    jumps = find_jumps(msgs, args.gap_hours)
+    if not jumps:
         print(f"  no forward time jump over {args.gap_hours:g} h")
+    for before, after in jumps:
+        print(f"  time jump: {before} -> {after} ({(after - before).total_seconds() / 3600:.1f} h)")
+    if jumps:
+        try:
+            before, after = stale_cut(msgs, args.gap_hours, args.max_stale_minutes)
+        except FitFixError as e:
+            print(f"  fit_fix_clock.py would refuse: {e}")
+        else:
+            kept = [m for m in records if m.ts >= after]
+            print(f"  fit_fix_clock.py would cut at {after}: "
+                  f"records before it: {len(records) - len(kept)}, after it: {len(kept)}")
+            if kept:
+                print(f"    first record kept: {kept[0].ts}")
 
     print("\n=== session/lap/activity field layout ===")
     for m in msgs:
