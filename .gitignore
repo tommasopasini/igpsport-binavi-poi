@@ -13,3 +13,6 @@ venv/
 # OS / editor
 .DS_Store
 *.swp
+
+# local device dumps/backups
+device_backup/
